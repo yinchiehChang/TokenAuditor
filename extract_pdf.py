@@ -28,15 +28,30 @@ def parse_report(pdf_path):
     if m: data["test_cases"] = int(m.group(1))
 
     # 风险项
-    for risk_match in re.finditer(
-        r"Risk:\s*(\S+)\s*Function:\s*(\w+)\s*Input\(s\):\s*(\[.*?\]|'.*?')(?:\n|$)",
-        text
-    ):
+    pattern = (
+        r"Risk:\s*(.+?)\s*"                # 风险类别
+        r"Function:\s*(\w+)\s*"            # 函数名
+        r"Input\(s\):\s*"
+        r"(\[[\s\S]*?\]|'.*?')"            # inputs：支持跨行，也懒惰匹配到首个 ] 或 '
+        r"(?=\nRisk:|$)"                   # 向前预查，下一个是换行+Risk: 或 文档末尾
+    )
+    for risk_match in re.finditer(pattern, text):
         data["risks"].append({
             "category": risk_match.group(1),
             "function": risk_match.group(2),
             "inputs": eval(risk_match.group(3))
         })
+
+        # 如果是出问题的那个 PDF，就打印所有匹配片段，看看到底匹配到哪儿了
+    # if pdf_path.name.endswith("0x56af6596f28d9e6f289521d31affdb95c412265e_report.pdf"):
+    #     print(f"\n=== 调试 {pdf_path.name} 的风险匹配 ===")
+    #     all_matches = list(re.finditer(pattern, text))
+    #     print(f"共找到 {len(all_matches)} 个匹配：")
+    #     for i, m in enumerate(all_matches, 1):
+    #         print(f"  匹配 #{i}:")
+    #         print("    来源：", repr(m.group(0)))
+    #         print("    inputs：", m.group(3))
+    #     print("=== 调试结束 ===\n")
 
     return data
 
@@ -48,8 +63,8 @@ for pdf_file in tqdm(pdf_files, desc="Processing PDF reports"):
     reports.append(parse_report(pdf_file))
 
 # 保存为 JSON
-# with open("all_reports.json", "w", encoding="utf-8") as f:
-#     json.dump(reports, f, ensure_ascii=False, indent=2)
+with open("all_reports.json", "w", encoding="utf-8") as f:
+    json.dump(reports, f, ensure_ascii=False, indent=2)
 
 # 把 list of dict 转成 DataFrame
 # 为了能在单元格里保存复杂的 risks 结构，这里先把它序列化为 JSON 字符串
