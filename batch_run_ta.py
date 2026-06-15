@@ -3,14 +3,17 @@ import csv
 import subprocess
 import sys
 import platform
+import time
 from tqdm import tqdm
 
 # 固定的 CSV 文件名
 CSV_FILE = "contracts/decoded_constructor_args.csv"
+
 # 结果输出文件
 RESULT_FILE = "contracts/result.csv"
+
 # 每个子进程最大运行时间（秒），超过则跳过
-TIMEOUT = 300 + 10  # 300 秒运行时间，加10秒缓冲
+TIMEOUT = 180 + 10  # 180 秒运行时间，加 10 秒缓冲
 
 # Ganache 终止命令
 if platform.system() == "Windows":
@@ -46,8 +49,14 @@ def run_commands(csv_path):
         print(f"错误：CSV 格式不正确，需包含 'address' 列", file=sys.stderr)
         sys.exit(1)
 
-    addresses = [row['address'].strip() for row in reader if row.get('address', '').strip()]
+    addresses = [
+        row['address'].strip()
+        for row in reader
+        if row.get('address', '').strip()
+    ]
+
     total = len(addresses)
+
     if total == 0:
         print("错误：未找到任何有效的地址", file=sys.stderr)
         sys.exit(1)
@@ -57,23 +66,37 @@ def run_commands(csv_path):
     # 打开结果文件并写入表头
     with open(RESULT_FILE, 'w', newline='', encoding='utf-8') as rf:
         writer = csv.writer(rf)
-        # 新增 reason 列说明失败原因
-        writer.writerow(['address', 'status', 'exit_code', 'reason'])
-        print('address,status,exit_code,reason')
 
-        # 创建 tqdm 进度条
-        pbar = tqdm(addresses, desc="处理地址进度", unit="addr", file=sys.stderr)
+        # 新增 elapsed_seconds 字段
+        writer.writerow([
+            'address',
+            'status',
+            'exit_code',
+            'elapsed_seconds',
+            'reason'
+        ])
+
+        print('address,status,exit_code,elapsed_seconds,reason')
+
+        pbar = tqdm(
+            addresses,
+            desc="处理地址进度",
+            unit="addr",
+            file=sys.stderr
+        )
+
         for idx, address in enumerate(pbar, start=1):
-            # 在进度条上显示当前 address
             pbar.set_postfix(address=address)
             tqdm.write(f"[{idx}/{total}] 开始处理地址 {address}")
+
+            start_time = time.perf_counter()
 
             try:
                 result = subprocess.run(
                     [
                         sys.executable, 'main.py',
                         '-c', address,
-                        '-l', '300',
+                        '-l', '180',
                         '-b', '10',
                         '-e', '50'
                     ],
@@ -81,53 +104,89 @@ def run_commands(csv_path):
                     text=True,
                     timeout=TIMEOUT
                 )
+
+                elapsed_seconds = time.perf_counter() - start_time
+                elapsed_seconds = round(elapsed_seconds, 2)
+
                 exit_code = result.returncode
+
                 if exit_code == 0:
                     status = 'success'
                     reason = ''
                     success_count += 1
-                    tqdm.write(f"[{idx}/{total}] [成功] 地址 {address}")
+                    tqdm.write(
+                        f"[{idx}/{total}] [成功] 地址 {address}，耗时 {elapsed_seconds} 秒"
+                    )
                 else:
                     status = 'failure'
-                    # 收集 stderr 的第一行作为原因
-                    reason = result.stderr.strip().splitlines()[0] if result.stderr else f"非零退出码 {exit_code}"
+                    reason = (
+                        result.stderr.strip().splitlines()[0]
+                        if result.stderr
+                        else f"非零退出码 {exit_code}"
+                    )
                     failure_count += 1
-                    tqdm.write(f"[{idx}/{total}] [失败] 地址 {address}：{reason}")
+                    tqdm.write(
+                        f"[{idx}/{total}] [失败] 地址 {address}，耗时 {elapsed_seconds} 秒：{reason}"
+                    )
 
             except subprocess.TimeoutExpired:
+                elapsed_seconds = time.perf_counter() - start_time
+                elapsed_seconds = round(elapsed_seconds, 2)
+
                 exit_code = ''
                 status = 'timeout'
                 reason = f"超过 {TIMEOUT} 秒超时"
                 timeout_count += 1
-                tqdm.write(f"[{idx}/{total}] [超时跳过] 地址 {address}：{reason}")
+
+                tqdm.write(
+                    f"[{idx}/{total}] [超时跳过] 地址 {address}，耗时 {elapsed_seconds} 秒：{reason}"
+                )
 
             except Exception as e:
+                elapsed_seconds = time.perf_counter() - start_time
+                elapsed_seconds = round(elapsed_seconds, 2)
+
                 exit_code = ''
                 status = 'error'
                 reason = str(e)
                 error_count += 1
-                tqdm.write(f"[{idx}/{total}] [异常跳过] 地址 {address}：{reason}")
 
-            # 写入结果并实时输出
-            writer.writerow([address, status, exit_code, reason])
+                tqdm.write(
+                    f"[{idx}/{total}] [异常跳过] 地址 {address}，耗时 {elapsed_seconds} 秒：{reason}"
+                )
+
+            # 写入 result.csv
+            writer.writerow([
+                address,
+                status,
+                exit_code,
+                elapsed_seconds,
+                reason
+            ])
+
             rf.flush()
-            print(f"{address},{status},{exit_code},{reason}")
 
-            # 若执行成功或失败，打印原脚本输出
-            if status in ('success', 'failure') and result.stdout:
-                tqdm.write(f"--- {address} STDOUT 开始 ---")
-                tqdm.write(result.stdout.strip())
-                tqdm.write(f"--- {address} STDOUT 结束 ---")
-            # 失败或 error 情形打印 stderr
-            if status in ('failure', 'error') and result.stderr:
-                tqdm.write(f"--- {address} STDERR 开始 ---")
-                tqdm.write(result.stderr.strip())
-                tqdm.write(f"--- {address} STDERR 结束 ---")
+            # 控制台实时输出 CSV 行
+            print(
+                f"{address},{status},{exit_code},{elapsed_seconds},{reason}",
+                flush=True
+            )
+
+            # 打印原脚本输出
+            if status in ('success', 'failure') and 'result' in locals():
+                if result.stdout:
+                    tqdm.write(f"--- {address} STDOUT 开始 ---")
+                    tqdm.write(result.stdout.strip())
+                    tqdm.write(f"--- {address} STDOUT 结束 ---")
+
+                if result.stderr:
+                    tqdm.write(f"--- {address} STDERR 开始 ---")
+                    tqdm.write(result.stderr.strip())
+                    tqdm.write(f"--- {address} STDERR 结束 ---")
 
             # 每运行完一个地址检测后，终止 Ganache 实例
             kill_ganache()
 
-    # 汇总信息
     tqdm.write("\n执行完毕")
     tqdm.write(f"成功: {success_count}/{total}")
     tqdm.write(f"失败: {failure_count}/{total}")
